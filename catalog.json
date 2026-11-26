@@ -1,0 +1,54 @@
+{
+  "format": 1,
+  "note": "よみがえり窓の定番カタログ。kind は snap / apt / flatpak。sets に入れたセット名で一括選択できます。",
+  "items": [
+    {"kind": "apt", "name": "ibus-mozc", "label": "Mozc（日本語入力）", "desc": "Google日本語入力のオープンソース版", "category": "日本語", "sets": ["日本語環境"]},
+    {"kind": "apt", "name": "mozc-utils-gui", "label": "Mozc 設定ツール", "desc": "Mozc の辞書ツール・プロパティ画面", "category": "日本語", "sets": ["日本語環境"]},
+    {"kind": "apt", "name": "fonts-ipafont", "label": "IPAフォント", "desc": "定番の日本語フォント（ゴシック・明朝）", "category": "日本語", "sets": ["日本語環境"]},
+    {"kind": "apt", "name": "fonts-ipaexfont", "label": "IPAexフォント", "desc": "文書向けの日本語フォント", "category": "日本語", "sets": ["日本語環境"]},
+    {"kind": "apt", "name": "fonts-noto-cjk-extra", "label": "Noto CJK 追加ウェイト", "desc": "Noto Sans/Serif CJK の太さ違い", "category": "日本語", "sets": ["日本語環境"]},
+    {"kind": "apt", "name": "nkf", "label": "nkf", "desc": "文字コード変換（Shift_JIS ⇔ UTF-8 など）", "category": "日本語", "sets": ["日本語環境"]},
+
+    {"kind": "apt", "name": "ubuntu-restricted-extras", "label": "動画・音楽コーデック", "desc": "MP3・MP4 などの再生に必要。Microsoftフォントの利用規約に同意したものとして入れます", "category": "動画・音楽", "sets": ["動画・音楽"]},
+    {"kind": "snap", "name": "vlc", "label": "VLC", "desc": "ほぼ何でも再生できる動画プレーヤー", "category": "動画・音楽", "sets": ["動画・音楽"]},
+    {"kind": "apt", "name": "ffmpeg", "label": "FFmpeg", "desc": "動画・音声の変換（コマンド）", "category": "動画・音楽", "sets": ["動画・音楽", "開発"]},
+    {"kind": "apt", "name": "handbrake", "label": "HandBrake", "desc": "動画の変換・圧縮", "category": "動画・音楽", "sets": ["動画・音楽"]},
+    {"kind": "apt", "name": "kdenlive", "label": "Kdenlive", "desc": "本格的な動画編集", "category": "動画・音楽", "sets": ["動画・音楽"]},
+    {"kind": "apt", "name": "obs-studio", "label": "OBS Studio", "desc": "画面録画・配信", "category": "動画・音楽", "sets": ["動画・音楽"]},
+    {"kind": "snap", "name": "audacity", "label": "Audacity", "desc": "音声の録音・編集", "category": "動画・音楽", "sets": ["動画・音楽"]},
+    {"kind": "snap", "name": "spotify", "label": "Spotify", "desc": "音楽配信サービス", "category": "動画・音楽", "sets": []},
+
+    {"kind": "apt", "name": "gimp", "label": "GIMP", "desc": "写真編集・画像加工", "category": "画像・デザイン", "sets": ["画像・デザイン"]},
+    {"kind": "apt", "name": "inkscape", "label": "Inkscape", "desc": "ベクター画像（イラスト・図）", "category": "画像・デザイン", "sets": ["画像・デザイン"]},
+    {"kind": "snap", "name": "krita", "label": "Krita", "desc": "お絵描き・デジタルペイント", "category": "画像・デザイン", "sets": ["画像・デザイン"]},
+    {"kind": "snap", "name": "blender", "label": "Blender", "desc": "3DCG 制作", "category": "画像・デザイン", "sets": ["画像・デザイン"], "classic": true},
+    {"kind": "snap", "name": "digikam", "label": "digiKam", "desc": "写真の整理・管理", "category": "画像・デザイン", "sets": ["画像・デザイン"]},
+
+    {"kind": "apt", "name": "libreoffice", "label": "LibreOffice", "desc": "ワープロ・表計算・プレゼン", "category": "事務", "sets": ["事務"]},
+    {"kind": "snap", "name": "thunderbird", "label": "Thunderbird", "desc": "メールソフト", "category": "事務", "sets": ["事務"]},
+    {"kind": "snap", "name": "obsidian", "label": "Obsidian", "desc": "メモ・ノート", "category": "事務", "sets": ["事務"], "classic": true},
+
+    {"kind": "snap", "name": "chromium", "label": "Chromium", "desc": "Chrome のオープンソース版ブラウザ", "category": "ネット・連絡", "sets": ["ネット・連絡"]},
+    {"kind": "snap", "name": "discord", "label": "Discord", "desc": "チャット・通話", "category": "ネット・連絡", "sets": ["ネット・連絡"]},
+    {"kind": "snap", "name": "zoom-client", "label": "Zoom", "desc": "ビデオ会議", "category": "ネット・連絡", "sets": ["ネット・連絡"]},
+    {"kind": "snap", "name": "telegram-desktop", "label": "Telegram", "desc": "メッセージアプリ", "category": "ネット・連絡", "sets": []},
+
+    {"kind": "apt", "name": "git", "label": "Git", "desc": "バージョン管理", "category": "開発", "sets": ["開発"]},
+    {"kind": "apt", "name": "build-essential", "label": "build-essential", "desc": "C/C++ のコンパイラなど開発の基本セット", "category": "開発", "sets": ["開発"]},
+    {"kind": "apt", "name": "curl", "label": "curl", "desc": "ネットからファイルを取るコマンド", "category": "開発", "sets": ["開発"]},
+    {"kind": "apt", "name": "python3-venv", "label": "Python venv", "desc": "Python の仮想環境", "category": "開発", "sets": ["開発"]},
+    {"kind": "apt", "name": "python3-pip", "label": "pip", "desc": "Python のパッケージ管理", "category": "開発", "sets": ["開発"]},
+    {"kind": "snap", "name": "code", "label": "Visual Studio Code", "desc": "定番のコードエディター", "category": "開発", "sets": ["開発"], "classic": true},
+    {"kind": "snap", "name": "android-studio", "label": "Android Studio", "desc": "Android アプリ開発", "category": "開発", "sets": [], "classic": true},
+    {"kind": "snap", "name": "flutter", "label": "Flutter", "desc": "スマホアプリ開発の SDK", "category": "開発", "sets": [], "classic": true},
+
+    {"kind": "apt", "name": "gnome-tweaks", "label": "GNOME Tweaks", "desc": "見た目や細かい設定の調整", "category": "システム", "sets": ["システム管理"]},
+    {"kind": "apt", "name": "gnome-shell-extension-manager", "label": "拡張機能マネージャー", "desc": "GNOME 拡張機能の検索・管理", "category": "システム", "sets": ["システム管理"]},
+    {"kind": "apt", "name": "timeshift", "label": "Timeshift", "desc": "システムのバックアップ・復元", "category": "システム", "sets": ["システム管理"]},
+    {"kind": "apt", "name": "gparted", "label": "GParted", "desc": "ディスクの区画（パーティション）編集", "category": "システム", "sets": ["システム管理"]},
+    {"kind": "apt", "name": "synaptic", "label": "Synaptic", "desc": "apt パッケージを画面で管理", "category": "システム", "sets": ["システム管理"]},
+    {"kind": "apt", "name": "htop", "label": "htop", "desc": "CPU・メモリの使用状況を見る", "category": "システム", "sets": ["システム管理"]},
+    {"kind": "apt", "name": "flatpak", "label": "Flatpak", "desc": "Flatpak アプリを使えるようにする（Flathub も登録します）", "category": "システム", "sets": ["システム管理"]},
+    {"kind": "flatpak", "name": "com.github.tchx84.Flatseal", "label": "Flatseal", "desc": "Flatpak アプリの権限設定", "category": "システム", "sets": [], "origin": "flathub"}
+  ]
+}
