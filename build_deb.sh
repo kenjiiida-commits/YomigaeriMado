@@ -25,8 +25,10 @@ chmod 755 "$ROOT/usr/bin/$PKG"
 cat > "$ROOT/usr/share/applications/$PKG.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
-Name=よみがえり窓
-Comment=再インストール後にアプリをまとめて入れ直す
+Name=Yomigaeri-mado
+Name[ja]=よみがえり窓
+Comment=Reinstall your apps after a fresh Ubuntu install
+Comment[ja]=再インストール後にアプリをまとめて入れ直す
 Exec=yomigaeri-mado
 Icon=system-software-install
 Terminal=false
@@ -44,8 +46,9 @@ Depends: python3, python3-pyside6.qtwidgets, python3-pyside6.qtgui, python3-pysi
 Maintainer: Kenji Iida <kenjiiida-commits@users.noreply.github.com>
 Homepage: https://github.com/kenjiiida-commits/YomigaeriMado
 Description: Reinstall your apps after a fresh Ubuntu install
- よみがえり窓: Ubuntu の再インストール後に、前のアプリ
- (Snap / apt / Flatpak) をまとめて入れ直すソフト。
+ Yomigaeri-mado exports the list of your apps (Snap, apt, Flatpak and
+ DEB packages from GitHub), your desktop settings and personal data,
+ and restores them all at once after reinstalling Ubuntu.
 EOF
 
 dpkg-deb --build --root-owner-group "$ROOT" "${PKG}_${VER}_all.deb"
