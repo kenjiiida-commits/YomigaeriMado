@@ -4,6 +4,8 @@ Ubuntu を再インストールしたあとに、前のパソコンに入れて�
 
 ## できること
 
+- **かんたん復元**：「① アプリを入れる → ② 設定とデータを戻す → ③ 仕上げ」を、画面の案内どおりに進めるだけで元の環境に戻せる。復元スクリプト `よみがえり.sh` から起動すると自動で始まる
+
 - 今のパソコンに入っているアプリ（Snap / apt / Flatpak）をリスト（JSON ファイル）に書き出す
 - 再インストール後にリストを開き、チェックを入れたアプリをまとめてインストールする（パスワードは最初の1回だけ）
 - GitHub のリリースで配布されている DEB アプリは、最新版を自動でダウンロードしてインストールする
@@ -22,7 +24,7 @@ Ubuntu を再インストールしたあとに、前のパソコンに入れて�
 [Releases](https://github.com/kenjiiida-commits/YomigaeriMado/releases) から `yomigaeri-mado_*_all.deb` をダウンロードして、次のコマンドを実行します。
 
 ```
-sudo apt install ./yomigaeri-mado_0.4.0_all.deb
+sudo apt install ./yomigaeri-mado_0.5.0_all.deb
 ```
 
 インストールすると、アプリメニューに「よみがえり窓」が表示されます。
@@ -40,6 +42,7 @@ sudo apt install ./yomigaeri-mado_0.4.0_all.deb
 ```
 yomigaeri-mado --export フォルダ    # 画面を出さずに書き出す
 yomigaeri-mado --open リスト.json   # リストを開いて起動
+yomigaeri-mado --restore リスト.json  # かんたん復元を始める
 ```
 
 ## 注意

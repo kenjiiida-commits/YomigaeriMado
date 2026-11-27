@@ -14,10 +14,12 @@ Ubuntu の再インストール後に、前のアプリをまとめて入れ直�
   8. デスクトップの設定（壁紙・ドック・ショートカットなど）と
      個人データ（Mozc 辞書・フォントなど）のバックアップと復元
   9. PPA・外部の入手先（Chrome など）の登録も書き出して戻す
+ 10. かんたん復元：アプリ → 設定とデータ → 仕上げ を画面の案内どおりに進める
 
 コマンドで使う場合:
   yomigaeri-mado --export フォルダ   リストと復元スクリプトを書き出す（画面なし）
   yomigaeri-mado --open リスト.json  リストを開いた状態で起動
+  yomigaeri-mado --restore リスト.json  かんたん復元を始める
 
 License: MIT  (c) 2026 飯田顕治
 """
@@ -39,7 +41,7 @@ import tarfile
 import tempfile
 
 APP_NAME = "よみがえり窓"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 LIST_FORMAT = 1
 HOME_REPO = "kenjiiida-commits/YomigaeriMado"
 
@@ -629,8 +631,8 @@ PY
   }
 fi
 
-nohup yomigaeri-mado --open "$LIST" >/dev/null 2>&1 &
-echo "よみがえり窓を開きました。画面の「③」を押すと、まとめてインストールが始まります。"
+nohup yomigaeri-mado --restore "$LIST" >/dev/null 2>&1 &
+echo "よみがえり窓を開きました。画面の案内に沿って進めてください。"
 '''
 
 
@@ -905,13 +907,13 @@ def build_install_script(items, fetcher_path="", work_dir="", repos=None):
 
 
 # ====================================================================== 画面
-def run_gui(open_path=None):
-    from PySide6.QtCore import QProcess, Qt
+def run_gui(open_path=None, wizard=False):
+    from PySide6.QtCore import QProcess, Qt, QTimer
     from PySide6.QtGui import QAction, QColor, QFont
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
         QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QInputDialog,
-        QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPlainTextEdit,
+        QLabel, QLineEdit, QListWidget, QMainWindow, QScrollArea, QStackedWidget, QMessageBox, QPlainTextEdit,
         QProgressBar, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
         QToolBar, QVBoxLayout, QWidget,
     )
@@ -1073,18 +1075,21 @@ def run_gui(open_path=None):
             save_config(cfg)
             super().accept()
 
-    class RestoreDialog(QDialog):
-        """デスクトップ設定と個人データを戻す。"""
-        def __init__(self, parent, settings_path, data_path):
-            super().__init__(parent)
-            self.setWindowTitle("設定とデータを戻す")
+    class RestorePicker(QWidget):
+        """デスクトップ設定と個人データのチェック一覧（ダイアログとかんたん復元で共用）。"""
+        def __init__(self, settings_path, data_path):
+            super().__init__()
             with open(settings_path, encoding="utf-8") as f:
                 self.info = json.load(f)
             self.data_path = data_path
-            v = QVBoxLayout(self)
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(0, 0, 0, 0)
+            sc = QScrollArea()
+            sc.setWidgetResizable(True)
+            inner = QWidget()
+            v = QVBoxLayout(inner)
             v.addWidget(QLabel(f"{self.info.get('created', '?')} に保存したものです。"
-                               "戻したいものにチェックを入れてください。\n"
-                               "アプリをインストールした後に戻すのがおすすめです。"))
+                               "戻したいものにチェックを入れてください。"))
             self.desk = {}
             if self.info.get("desktop"):
                 v.addWidget(QLabel("<b>デスクトップの設定</b>"))
@@ -1094,8 +1099,7 @@ def run_gui(open_path=None):
                     self.desk[label] = cb
                     v.addWidget(cb)
             self.data = {}
-            has_tar = self.info.get("data") and os.path.exists(data_path)
-            if has_tar:
+            if self.info.get("data") and os.path.exists(data_path):
                 v.addWidget(QLabel("<b>個人データ</b>（同じ名前のファイルは上書きします）"))
                 for e in self.info["data"]:
                     cb = QCheckBox(e["label"])
@@ -1106,18 +1110,18 @@ def run_gui(open_path=None):
             elif self.info.get("data"):
                 v.addWidget(QLabel("個人データのファイルが見つかりません: " +
                                    os.path.basename(data_path)))
-            btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-            btns.button(QDialogButtonBox.Ok).setText("戻す")
-            btns.accepted.connect(self.accept)
-            btns.rejected.connect(self.reject)
-            v.addWidget(btns)
+            v.addStretch(1)
+            sc.setWidget(inner)
+            outer.addWidget(sc)
 
-        def accept(self):
+        def anything(self):
+            return any(cb.isChecked() for cb in
+                       list(self.desk.values()) + list(self.data.values()))
+
+        def apply(self):
+            """選んだものを戻して、結果の行を返す。"""
             labels_d = [l for l, cb in self.data.items() if cb.isChecked()]
             labels_s = [l for l, cb in self.desk.items() if cb.isChecked()]
-            if not labels_d and not labels_s:
-                super().reject()
-                return
             lines = []
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
@@ -1136,10 +1140,348 @@ def run_gui(open_path=None):
                                  ("" if ok else f": {msg}"))
             finally:
                 QApplication.restoreOverrideCursor()
+            return lines
+
+    class RestoreDialog(QDialog):
+        """デスクトップ設定と個人データを戻す。"""
+        def __init__(self, parent, settings_path, data_path):
+            super().__init__(parent)
+            self.setWindowTitle("設定とデータを戻す")
+            v = QVBoxLayout(self)
+            v.addWidget(QLabel("アプリをインストールした後に戻すのがおすすめです。"))
+            self.picker = RestorePicker(settings_path, data_path)
+            v.addWidget(self.picker, 1)
+            btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            btns.button(QDialogButtonBox.Ok).setText("戻す")
+            btns.accepted.connect(self.accept)
+            btns.rejected.connect(self.reject)
+            v.addWidget(btns)
+            self.resize(480, 520)
+
+        def accept(self):
+            if not self.picker.anything():
+                super().reject()
+                return
+            lines = self.picker.apply()
             QMessageBox.information(
                 self, APP_NAME, "戻しました。\n" + "\n".join(lines) +
                 "\n\n全部を反映させるには、一度ログアウトしてログインし直してください。")
             super().accept()
+
+    class RestoreWizard(QDialog):
+        """かんたん復元：アプリ → 設定とデータ → 仕上げ を順に進める。"""
+        def __init__(self, win):
+            super().__init__(win)
+            self.win = win
+            self.setWindowTitle("かんたん復元")
+            self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            self.resize(560, 560)
+            meta = win.list_meta
+            self.settings_path, self.data_path = companion_paths(win.list_path)
+            self.has_settings = os.path.exists(self.settings_path)
+            self.install_result = None   # (ok, ng) / "skip"
+            self.restore_lines = None    # [...] / "skip"
+            self.running = False
+
+            v = QVBoxLayout(self)
+            self.steps = QLabel()
+            self.steps.setWordWrap(True)
+            v.addWidget(self.steps)
+            self.stack = QStackedWidget()
+            v.addWidget(self.stack, 1)
+
+            # --- 0 はじめに
+            p0 = QWidget()
+            l0 = QVBoxLayout(p0)
+            todo = len(win.checked_items())
+            manual = [i["name"] for i in win.items if i["kind"] == "deb-local"
+                      and win.state_of(win.row_of[(i["kind"], i["name"])])
+                      != "インストール済み"]
+            t = (f"<h3>前のパソコンの環境を、3つの手順で元に戻します</h3>"
+                 f"リスト：{os.path.basename(win.list_path)}<br>"
+                 f"（{meta.get('hostname', '?')} / {meta.get('os', '?')} / "
+                 f"{meta.get('created', '?')} 作成）<br><br>"
+                 f"<b>① アプリを入れる</b>　まだ入っていない {todo} 個<br>"
+                 f"<b>② 設定とデータを戻す</b>　"
+                 f"{'壁紙・ドック・辞書など' if self.has_settings else '保存されていません'}<br>"
+                 f"<b>③ 仕上げ</b>　ログインし直して完了<br><br>"
+                 "インターネットにつないだまま、パソコンを切らずに進めてください。")
+            if manual:
+                t += ("<br><br>※次のアプリは自動で入れられないので、後で手動で入れてください："
+                      "<br>・" + "<br>・".join(manual))
+            lab = QLabel(t)
+            lab.setWordWrap(True)
+            l0.addWidget(lab)
+            l0.addStretch(1)
+            self.stack.addWidget(p0)
+
+            # --- 1 アプリ
+            p1 = QWidget()
+            l1 = QVBoxLayout(p1)
+            self.app_label = QLabel()
+            self.app_label.setWordWrap(True)
+            l1.addWidget(self.app_label)
+            self.app_progress = QProgressBar()
+            self.app_progress.setFormat("%v / %m")
+            self.app_progress.hide()
+            l1.addWidget(self.app_progress)
+            self.app_now = QLabel()
+            self.app_now.setWordWrap(True)
+            l1.addWidget(self.app_now)
+            row = QHBoxLayout()
+            self.b_install = QPushButton("インストールを始める")
+            self.b_install.setStyleSheet("font-weight: bold; padding: 6px 14px;")
+            self.b_install.clicked.connect(self.do_install)
+            self.b_retry = QPushButton("失敗したものをやり直す")
+            self.b_retry.clicked.connect(self.do_retry)
+            self.b_retry.hide()
+            row.addWidget(self.b_install)
+            row.addWidget(self.b_retry)
+            row.addStretch(1)
+            l1.addLayout(row)
+            l1.addStretch(1)
+            self.stack.addWidget(p1)
+
+            # --- 2 設定とデータ
+            p2 = QWidget()
+            l2 = QVBoxLayout(p2)
+            if self.has_settings:
+                l2.addWidget(QLabel("<h3>② 設定とデータを戻す</h3>"))
+                self.picker = RestorePicker(self.settings_path, self.data_path)
+                l2.addWidget(self.picker, 1)
+                self.b_apply = QPushButton("チェックしたものを戻す")
+                self.b_apply.setStyleSheet("font-weight: bold; padding: 6px 14px;")
+                self.b_apply.clicked.connect(self.do_restore)
+                l2.addWidget(self.b_apply, 0, Qt.AlignLeft)
+            else:
+                self.picker = None
+                lab = QLabel("<h3>② 設定とデータを戻す</h3>"
+                             "このリストには、デスクトップの設定と個人データが"
+                             "保存されていません（v0.4.0 より前に書き出したリストです）。"
+                             "「次へ」で進んでください。")
+                lab.setWordWrap(True)
+                l2.addWidget(lab)
+                l2.addStretch(1)
+            self.restore_label = QLabel()
+            self.restore_label.setWordWrap(True)
+            l2.addWidget(self.restore_label)
+            self.stack.addWidget(p2)
+
+            # --- 3 仕上げ
+            p3 = QWidget()
+            l3 = QVBoxLayout(p3)
+            self.final = QLabel()
+            self.final.setWordWrap(True)
+            self.final.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            l3.addWidget(self.final)
+            l3.addStretch(1)
+            self.b_logout = QPushButton("今すぐログアウトする")
+            self.b_logout.clicked.connect(self.do_logout)
+            l3.addWidget(self.b_logout, 0, Qt.AlignLeft)
+            self.stack.addWidget(p3)
+
+            # --- 下のボタン
+            nav = QHBoxLayout()
+            self.b_skip = QPushButton("この手順をとばす")
+            self.b_skip.clicked.connect(self.skip)
+            self.b_back = QPushButton("戻る")
+            self.b_back.clicked.connect(lambda: self.go(self.stack.currentIndex() - 1))
+            self.b_next = QPushButton("次へ")
+            self.b_next.setDefault(True)
+            self.b_next.clicked.connect(self.next)
+            nav.addWidget(self.b_skip)
+            nav.addStretch(1)
+            nav.addWidget(self.b_back)
+            nav.addWidget(self.b_next)
+            v.addLayout(nav)
+
+            self.timer = QTimer(self)
+            self.timer.timeout.connect(self.mirror)
+            win.install_listeners.append(self.on_install_done)
+            self.refresh_app_page()
+            self.go(0)
+
+        # ---- 画面の切り替え
+        def go(self, i):
+            i = max(0, min(3, i))
+            self.stack.setCurrentIndex(i)
+            names = ["はじめに", "① アプリを入れる", "② 設定とデータを戻す", "③ 仕上げ"]
+            self.steps.setText("　→　".join(
+                f"<b><u>{n}</u></b>" if k == i else
+                (f"<span style='color:#2e7d32'>{n} ✓</span>" if k < i else
+                 f"<span style='color:gray'>{n}</span>")
+                for k, n in enumerate(names)))
+            if i == 3:
+                self.build_final()
+            self.update_buttons()
+
+        def update_buttons(self):
+            i = self.stack.currentIndex()
+            self.b_back.setEnabled(0 < i and not self.running)
+            self.b_skip.setVisible(i in (1, 2))
+            self.b_skip.setEnabled(not self.running)
+            if i == 0:
+                self.b_next.setText("はじめる")
+            elif i == 3:
+                self.b_next.setText("閉じる")
+            else:
+                self.b_next.setText("次へ")
+            done1 = self.install_result is not None
+            done2 = self.restore_lines is not None or not self.has_settings
+            self.b_next.setEnabled(not self.running and (
+                i == 0 or i == 3 or (i == 1 and done1) or (i == 2 and done2)))
+
+        def next(self):
+            i = self.stack.currentIndex()
+            if i == 3:
+                self.close()
+                return
+            self.go(i + 1)
+
+        def skip(self):
+            i = self.stack.currentIndex()
+            if i == 1 and self.install_result is None:
+                self.install_result = "skip"
+            if i == 2 and self.restore_lines is None:
+                self.restore_lines = "skip"
+            self.go(i + 1)
+
+        # ---- ① アプリ
+        def refresh_app_page(self):
+            todo = self.win.checked_items()
+            repos = self.win.current_repos(todo)
+            t = "<h3>① アプリを入れる</h3>"
+            if self.install_result is None:
+                if todo:
+                    t += (f"まだ入っていないアプリ <b>{len(todo)} 個</b> を入れます。<br>"
+                          "いらないものは、後ろの一覧でチェックをはずしてから始めてください。<br>"
+                          "パスワードを1回だけ聞かれます。数が多いと時間がかかります。")
+                    if repos:
+                        t += ("<br><br>追加の入手先も登録します：<br>・" +
+                              "<br>・".join(repo_label(r) for r in repos if r["file"]))
+                    if any((i["kind"], i["name"]) in PRE_ROOT for i in todo):
+                        t += ("<br><br>※動画・音楽コーデックは、Microsoft フォントの"
+                              "利用規約に同意したものとして入れます。")
+                else:
+                    t += "入れるアプリはありません（全部入っています）。「次へ」で進んでください。"
+                    self.install_result = (0, 0)
+            self.app_label.setText(t)
+            self.b_install.setVisible(self.install_result is None and bool(todo))
+
+        def do_install(self):
+            todo = self.win.checked_items()
+            if not todo:
+                self.refresh_app_page()
+                self.update_buttons()
+                return
+            self.start(todo)
+
+        def do_retry(self):
+            todo = [it for r, it in enumerate(self.win.items)
+                    if self.win.state_of(r) == "失敗"]
+            if todo:
+                self.start(todo)
+
+        def start(self, todo):
+            self.running = True
+            self.b_install.hide()
+            self.b_retry.hide()
+            self.app_progress.show()
+            self.app_progress.setMaximum(len(todo))
+            self.app_progress.setValue(0)
+            self.app_now.setText("パスワードの画面が出たら、入力してください。")
+            self.update_buttons()
+            self.win.start_install(todo)
+            self.timer.start(400)
+
+        def mirror(self):
+            self.app_progress.setMaximum(max(1, self.win.total_count))
+            self.app_progress.setValue(self.win.done_count)
+            self.app_now.setText(self.win.info.text())
+
+        def on_install_done(self, cancelled, ok, ng):
+            self.timer.stop()
+            self.running = False
+            self.app_progress.setValue(self.win.done_count)
+            if cancelled:
+                self.app_now.setText("パスワード入力がキャンセルされました。"
+                                     "もう一度「インストールを始める」を押してください。")
+                self.app_progress.hide()
+                self.b_install.show()
+            else:
+                prev = self.install_result if isinstance(self.install_result, tuple) else (0, 0)
+                failed = sum(1 for r in range(len(self.win.items))
+                             if self.win.state_of(r) == "失敗")
+                self.install_result = (prev[0] + ok, failed)
+                self.app_label.setText("<h3>① アプリを入れる</h3>")
+                msg = f"終わりました。成功 {ok} 個 / 失敗 {failed} 個。"
+                if failed:
+                    msg += ("<br>失敗したものは「失敗したものをやり直す」で再挑戦できます。"
+                            "うまくいかなければ、とばして先に進んでも大丈夫です。")
+                    self.b_retry.show()
+                else:
+                    msg += "<br>「次へ」で設定とデータを戻します。"
+                self.app_now.setText(msg)
+            self.update_buttons()
+
+        # ---- ② 設定とデータ
+        def do_restore(self):
+            if not self.picker.anything():
+                QMessageBox.information(self, APP_NAME, "チェックが入っていません。")
+                return
+            self.restore_lines = self.picker.apply()
+            self.b_apply.setEnabled(False)
+            self.restore_label.setText("<b>戻しました。</b><br>" +
+                                       "<br>".join(self.restore_lines))
+            self.update_buttons()
+
+        # ---- ③ 仕上げ
+        def build_final(self):
+            t = "<h3>③ 仕上げ</h3>"
+            r = self.install_result
+            if isinstance(r, tuple):
+                t += f"アプリ：成功 {r[0]} 個"
+                if r[1]:
+                    fails = [it["name"] for k, it in enumerate(self.win.items)
+                             if self.win.state_of(k) == "失敗"]
+                    t += (f" / 失敗 {r[1]} 個<br>　入らなかったもの：" + "、".join(fails) +
+                          "<br>　（後で「失敗したものをやり直す」で再挑戦できます）")
+            else:
+                t += "アプリ：とばしました"
+            t += "<br>"
+            if isinstance(self.restore_lines, list):
+                bad = [l for l in self.restore_lines if l.startswith("✗")]
+                t += (f"設定とデータ：{len(self.restore_lines) - len(bad)} 件を戻しました" +
+                      ("<br>　" + "<br>　".join(bad) if bad else ""))
+            elif self.has_settings:
+                t += "設定とデータ：とばしました"
+            manual = [i["name"] for i in self.win.items if i["kind"] == "deb-local"
+                      and self.win.state_of(self.win.row_of[(i["kind"], i["name"])])
+                      != "インストール済み"]
+            if manual:
+                t += "<br>手動で入れるもの：" + "、".join(manual)
+            t += ("<br><br><b>最後に、一度ログアウトしてログインし直してください。</b><br>"
+                  "壁紙やドック、日本語入力などの設定が、すべて反映されます。")
+            self.final.setText(t)
+
+        def do_logout(self):
+            if shutil.which("gnome-session-quit"):
+                QProcess.startDetached("gnome-session-quit", ["--logout"])
+            else:
+                QMessageBox.information(self, APP_NAME,
+                                        "右上のメニューからログアウトしてください。")
+
+        def closeEvent(self, ev):
+            if self.running:
+                QMessageBox.information(self, APP_NAME,
+                                        "インストール中です。終わるまで待ってください。")
+                ev.ignore()
+                return
+            try:
+                self.win.install_listeners.remove(self.on_install_done)
+            except ValueError:
+                pass
+            ev.accept()
 
     class MainWindow(QMainWindow):
         def __init__(self):
@@ -1158,6 +1500,8 @@ def run_gui(open_path=None):
             self.list_meta = {}
             self.dirty = False
             self._buf = ""
+            self.install_listeners = []
+            self.wizard = None
             self._build_ui()
             self._set_info("「① 今のアプリを書き出す」「② リストを開く」"
                            "「定番カタログ」のどれかから始めてください。")
@@ -1182,6 +1526,7 @@ def run_gui(open_path=None):
                 self.acts.append(a)
                 return a
 
+            act("かんたん復元（おすすめ）", self.wizard_action)
             act("① 今のアプリを書き出す", self.export_list)
             act("② リストを開く", self.open_list_dialog)
             act("③ 選んだものをまとめてインストール", self.install_selected)
@@ -1690,6 +2035,25 @@ def run_gui(open_path=None):
             return [r for r in self.list_meta.get("repos", [])
                     if r.get("file") or r.get("keys")]
 
+        def wizard_action(self):
+            if self.mode != "list" or not self.list_path:
+                path, _ = QFileDialog.getOpenFileName(
+                    self, "元に戻したいリストを選んでください", os.path.expanduser("~"),
+                    "よみがえりリスト (*.json)")
+                if not path:
+                    return
+                self.open_list(path)
+                if not self.list_path:
+                    return
+            self.start_wizard()
+
+        def start_wizard(self):
+            if self.wizard and self.wizard.isVisible():
+                self.wizard.raise_()
+                return
+            self.wizard = RestoreWizard(self)
+            self.wizard.show()
+
         def data_choice_dialog(self):
             DataChoiceDialog(self).exec()
 
@@ -1803,6 +2167,8 @@ def run_gui(open_path=None):
                 for r in range(len(self.items)):
                     if self.state_of(r) == "待ち":
                         self.set_state(r, "未インストール")
+                for cb in list(self.install_listeners):
+                    cb(True, 0, 0)
                 return
             # インストール後の設定（自分の設定）
             notes = []
@@ -1823,7 +2189,11 @@ def run_gui(open_path=None):
                         "何度も失敗する場合は下の記録を見てください"
                         "（PPA など追加の入手先が必要なソフトの可能性があります）。")
             self._set_info(msg)
-            QMessageBox.information(self, APP_NAME, msg)
+            if self.install_listeners:
+                for cb in list(self.install_listeners):
+                    cb(False, self.ok_count, self.ng_count)
+            else:
+                QMessageBox.information(self, APP_NAME, msg)
 
         def closeEvent(self, ev):
             if self.proc and self.proc.state() != QProcess.NotRunning:
@@ -1843,6 +2213,8 @@ def run_gui(open_path=None):
     w.show()
     if open_path:
         w.open_list(open_path)
+        if wizard and w.list_path:
+            w.start_wizard()
     return app.exec()
 
 
@@ -1852,12 +2224,14 @@ def main():
                     help="画面を出さずにリストと復元スクリプトを書き出す")
     ap.add_argument("--open", metavar="リスト.json",
                     help="リストを開いた状態で起動する")
+    ap.add_argument("--restore", metavar="リスト.json",
+                    help="リストを開いて、かんたん復元を始める")
     ap.add_argument("--version", action="version",
                     version=f"{APP_NAME} {APP_VERSION}")
     args = ap.parse_args()
     if args.export:
         sys.exit(cli_export(os.path.expanduser(args.export)))
-    sys.exit(run_gui(args.open))
+    sys.exit(run_gui(args.restore or args.open, wizard=bool(args.restore)))
 
 
 if __name__ == "__main__":
