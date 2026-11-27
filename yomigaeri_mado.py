@@ -11,6 +11,9 @@ Ubuntu の再インストール後に、前のアプリをまとめて入れ直�
   5. 定番カタログ・目的別セットから、入っていない定番ソフトを選んで入れる
   6. リストの自動書き出し（毎日 / 毎週）と「これ1つで復元」スクリプト
   7. インストール後の設定（Mozc を入力ソースに追加 など）
+  8. デスクトップの設定（壁紙・ドック・ショートカットなど）と
+     個人データ（Mozc 辞書・フォントなど）のバックアップと復元
+  9. PPA・外部の入手先（Chrome など）の登録も書き出して戻す
 
 コマンドで使う場合:
   yomigaeri-mado --export フォルダ   リストと復元スクリプトを書き出す（画面なし）
@@ -21,6 +24,7 @@ License: MIT  (c) 2026 飯田顕治
 
 import argparse
 import ast
+import base64
 import datetime
 import gzip
 import json
@@ -31,10 +35,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 
 APP_NAME = "よみがえり窓"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 LIST_FORMAT = 1
 HOME_REPO = "kenjiiida-commits/YomigaeriMado"
 
@@ -62,7 +67,15 @@ SNAP_SKIP_NAMES = ("bare", "snapd")
 
 # apt で「自分で入れた」とみなさないもの（カーネルなど）
 APT_SKIP_PREFIX = ("linux-image", "linux-headers", "linux-modules",
-                   "linux-generic", "linux-firmware", "linux-signed")
+                   "linux-generic", "linux-firmware", "linux-signed",
+                   # 言語の設定で自動的に入るもの
+                   "language-pack-", "libreoffice-l10n-", "libreoffice-help-",
+                   "hunspell-", "hyphen-", "mythes-", "gnome-user-docs-",
+                   "firefox-locale-", "thunderbird-locale-")
+
+# Ubuntu の標準パッケージの元になるメタパッケージ
+STANDARD_METAS = ("ubuntu-desktop", "ubuntu-desktop-minimal", "ubuntu-minimal",
+                  "ubuntu-standard", "ubuntu-server", "ubuntu-server-minimal")
 
 # ---- インストール前後の作業（パッケージごと）
 # root で、インストールの前に実行するもの
@@ -184,13 +197,44 @@ def local_deb_packages():
     return names
 
 
+def standard_packages():
+    """Ubuntu に最初から入っている（標準の）パッケージ名の集合。
+    ubuntu-desktop などのメタパッケージがたどる依存関係と、
+    優先度が required / important / standard のものを集める。"""
+    names = set()
+    out = run(["dpkg-query", "-W",
+               "-f=${Package} ${Priority} ${db:Status-Status}\n"])
+    installed = set()
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) == 3 and cols[2] == "installed":
+            installed.add(cols[0])
+            if cols[1] in ("required", "important", "standard"):
+                names.add(cols[0])
+    metas = [m for m in STANDARD_METAS if m in installed]
+    if metas:
+        out = run(["apt-cache", "depends", "--recurse", "--installed",
+                   "--no-suggests", "--no-conflicts", "--no-breaks",
+                   "--no-replaces", "--no-enhances"] + metas, timeout=300)
+        for line in out.splitlines():
+            if line and not line[0].isspace() and not line.startswith("<"):
+                names.add(line.strip())
+    return names
+
+
 def list_apt():
     """自分で入れた apt パッケージ: (repo_pkgs, local_pkgs, filtered)"""
     manual = set(run(["apt-mark", "showmanual"]).split())
     initial = initial_packages()
-    mine = {p for p in manual - initial if not p.startswith(APT_SKIP_PREFIX)}
+    std = standard_packages()
+    mine = {p for p in manual - initial - std
+            if not p.startswith(APT_SKIP_PREFIX)}
     local = local_deb_packages()
-    return sorted(mine - local), sorted(mine & local), bool(initial)
+    # DEB ファイルから入れたものは、標準と重なっても残す
+    local_mine = {p for p in manual & local
+                  if not p.startswith(APT_SKIP_PREFIX)}
+    return (sorted(mine - local), sorted(local_mine),
+            bool(initial or std))
 
 
 def deb_homepage(name):
@@ -263,6 +307,280 @@ def load_catalog():
         data = json.load(f)
     return [i for i in data["items"]
             if i.get("kind") in KIND_LABEL and i.get("name")]
+
+
+# ------------------------------------------------- 追加の入手先（PPA など）
+SOURCES_DIR = "/etc/apt/sources.list.d"
+TRUSTED_DIR = "/etc/apt/trusted.gpg.d"
+
+
+def collect_repos():
+    """Ubuntu 標準以外の入手先の登録ファイルと、その鍵を集める。"""
+    repos = []
+    try:
+        names = sorted(os.listdir(SOURCES_DIR))
+    except Exception:
+        names = []
+    for fn in names:
+        if not fn.endswith((".list", ".sources")) or fn.startswith("ubuntu"):
+            continue
+        path = os.path.join(SOURCES_DIR, fn)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except Exception:
+            continue
+        active = [l for l in content.splitlines()
+                  if l.strip() and not l.lstrip().startswith("#")]
+        if not active:
+            continue
+        keys = {}
+        for m in re.finditer(r"signed-by\s*[=:]\s*(/[^\s\]]+)", content, re.I):
+            kp = m.group(1)
+            if os.path.isfile(kp) and "ubuntu-archive" not in kp:
+                try:
+                    with open(kp, "rb") as f:
+                        keys[kp] = base64.b64encode(f.read()).decode()
+                except Exception:
+                    pass
+        repos.append({"file": fn, "content": content, "keys": keys})
+    # 古い方式の鍵（trusted.gpg.d）
+    loose = {}
+    try:
+        for fn in sorted(os.listdir(TRUSTED_DIR)):
+            if fn.startswith("ubuntu-keyring") or \
+                    not fn.endswith((".gpg", ".asc")):
+                continue
+            kp = os.path.join(TRUSTED_DIR, fn)
+            with open(kp, "rb") as f:
+                loose[kp] = base64.b64encode(f.read()).decode()
+    except Exception:
+        pass
+    if loose and repos:
+        repos.append({"file": "", "content": "", "keys": loose})
+    return repos
+
+
+def repo_label(r):
+    """登録ファイルから、人が読める名前（URL）を取り出す。"""
+    m = re.search(r"(?:^deb\s+(?:\[[^\]]*\]\s+)?|^URIs:\s*)(\S+)",
+                  r.get("content", ""), re.M)
+    return m.group(1) if m else r.get("file", "")
+
+
+# ---------------------------------------------- デスクトップの設定（dconf）
+# (表示名, [まるごと保存するフォルダ], [1つずつ保存するキー])
+DESKTOP_GROUPS = [
+    ("壁紙とロック画面", ["/org/gnome/desktop/background/",
+                     "/org/gnome/desktop/screensaver/"], []),
+    ("ドックに並べたアプリ", [], ["/org/gnome/shell/favorite-apps"]),
+    ("ドックの設定", ["/org/gnome/shell/extensions/dash-to-dock/"], []),
+    ("見た目（テーマ・ダーク・フォント・文字の大きさ）",
+     ["/org/gnome/desktop/interface/"], []),
+    ("キーボードショートカット",
+     ["/org/gnome/desktop/wm/keybindings/", "/org/gnome/shell/keybindings/",
+      "/org/gnome/settings-daemon/plugins/media-keys/"], []),
+    ("入力ソース", ["/org/gnome/desktop/input-sources/"], []),
+    ("マウス・タッチパッド", ["/org/gnome/desktop/peripherals/"], []),
+    ("ウィンドウの動作", ["/org/gnome/desktop/wm/preferences/",
+                    "/org/gnome/mutter/"], []),
+    ("電源と画面オフ", ["/org/gnome/settings-daemon/plugins/power/",
+                  "/org/gnome/desktop/session/"], []),
+    ("夜間モード", ["/org/gnome/settings-daemon/plugins/color/"], []),
+    ("ファイル（Nautilus）", ["/org/gnome/nautilus/"], []),
+    ("端末", ["/org/gnome/terminal/"], []),
+    ("GNOME 拡張機能のオン・オフ", [], ["/org/gnome/shell/enabled-extensions",
+                                  "/org/gnome/shell/disabled-extensions"]),
+]
+
+
+def collect_desktop():
+    """{表示名: {"dirs": {パス: dump}, "keys": {キー: 値}}}"""
+    if shutil.which("dconf") is None:
+        return {}
+    groups = {}
+    for label, dirs, keys in DESKTOP_GROUPS:
+        g = {"dirs": {}, "keys": {}}
+        for d in dirs:
+            dump = run(["dconf", "dump", d]).strip()
+            if dump:
+                g["dirs"][d] = dump
+        for k in keys:
+            v = run(["dconf", "read", k]).strip()
+            if v:
+                g["keys"][k] = v
+        if g["dirs"] or g["keys"]:
+            groups[label] = g
+    return groups
+
+
+def wallpaper_files(groups):
+    """壁紙・ロック画面に使っている、ホームフォルダ内の画像（ホームからの相対パス）。"""
+    home = os.path.expanduser("~")
+    out = []
+    g = groups.get("壁紙とロック画面", {})
+    for dump in g.get("dirs", {}).values():
+        for m in re.finditer(r"'file://([^']+)'", dump):
+            p = urllib_unquote(m.group(1))
+            if p.startswith(home + "/") and os.path.isfile(p):
+                rel = os.path.relpath(p, home)
+                if rel not in out:
+                    out.append(rel)
+    return out
+
+
+def urllib_unquote(s):
+    from urllib.parse import unquote
+    return unquote(s)
+
+
+def restore_desktop(groups, labels, old_home=""):
+    """選んだ設定を戻す。[(表示名, 成功, メッセージ)]"""
+    home = os.path.expanduser("~")
+    results = []
+    for label in labels:
+        g = groups.get(label)
+        if not g:
+            continue
+        errs = []
+        for d, dump in g.get("dirs", {}).items():
+            if old_home and old_home != home:
+                dump = dump.replace(old_home + "/", home + "/")
+            r = subprocess.run(["dconf", "load", d], input=dump + "\n",
+                               capture_output=True, text=True)
+            if r.returncode:
+                errs.append(r.stderr.strip())
+        for k, v in g.get("keys", {}).items():
+            r = subprocess.run(["dconf", "write", k, v],
+                               capture_output=True, text=True)
+            if r.returncode:
+                errs.append(r.stderr.strip())
+        results.append((label, not errs, "; ".join(errs)))
+    return results
+
+
+# ------------------------------------------------------- 個人データ
+# (表示名, [ホームからの相対パス], 最初からオンにするか)
+DATA_CANDIDATES = [
+    ("Mozc の辞書と設定", [".mozc", ".config/mozc"], True),
+    ("自分で入れたフォント", [".local/share/fonts", ".fonts"], True),
+    ("自作のアプリ起動アイコン", [".local/share/applications"], True),
+    ("自動起動の設定", [".config/autostart"], True),
+    ("シェルの設定（.bashrc など）",
+     [".bashrc", ".profile", ".bash_aliases", ".inputrc"], True),
+    ("Git の設定", [".gitconfig"], True),
+    ("よみがえり窓の設定", [".config/yomigaeri-mado"], True),
+]
+WALLPAPER_LABEL = "壁紙の画像"
+# 安全のため、バックアップに入れないもの
+DATA_FORBIDDEN = (".ssh", ".gnupg", ".local/share/keyrings", ".pki",
+                  ".password-store", ".mozilla", ".config/google-chrome",
+                  ".config/chromium", ".cache")
+
+
+def data_forbidden(rel):
+    rel = rel.strip("/")
+    return any(rel == f or rel.startswith(f + "/") for f in DATA_FORBIDDEN)
+
+
+def path_size(p):
+    if os.path.isfile(p):
+        return os.path.getsize(p)
+    total = 0
+    for root, _dirs, files in os.walk(p):
+        for f in files:
+            fp = os.path.join(root, f)
+            if not os.path.islink(fp):
+                try:
+                    total += os.path.getsize(fp)
+                except OSError:
+                    pass
+    return total
+
+
+def human_size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def data_selection(cfg=None):
+    """設定に従って、バックアップする個人データ [(表示名, [相対パス])]。
+    実在するものだけ返す。"""
+    cfg = cfg if cfg is not None else load_config()
+    choice = cfg.get("data_choice", {})
+    home = os.path.expanduser("~")
+    out = []
+    for label, rels, default in DATA_CANDIDATES:
+        if not choice.get(label, default):
+            continue
+        ex = [r for r in rels if os.path.exists(os.path.join(home, r))]
+        if ex:
+            out.append((label, ex))
+    for rel in cfg.get("data_extra", []):
+        if not data_forbidden(rel) and os.path.exists(os.path.join(home, rel)):
+            out.append((rel, [rel]))
+    return out
+
+
+def companion_paths(list_path):
+    """リストに付く「設定」と「データ」のファイル名。"""
+    base = list_path[:-5] if list_path.endswith(".json") else list_path
+    return base + "_設定.json", base + "_データ.tar.gz"
+
+
+def export_extras(list_path, with_data=True):
+    """デスクトップ設定と個人データを、リストの隣に書き出す。説明文を返す。"""
+    settings_path, data_path = companion_paths(list_path)
+    home = os.path.expanduser("~")
+    groups = collect_desktop()
+    data = data_selection() if with_data else []
+    walls = wallpaper_files(groups) if with_data else []
+    if walls:
+        data.append((WALLPAPER_LABEL, walls))
+    index = []
+    if data:
+        tmp = data_path + ".tmp"
+        with tarfile.open(tmp, "w:gz") as tar:
+            for label, rels in data:
+                for rel in rels:
+                    tar.add(os.path.join(home, rel), arcname=rel)
+                index.append({"label": label, "paths": rels})
+        os.replace(tmp, data_path)
+    elif os.path.exists(data_path):
+        os.remove(data_path)
+    info = {"format": 1, "created": datetime.datetime.now()
+            .isoformat(timespec="seconds"), "home": home,
+            "desktop": groups, "data": index,
+            "data_file": os.path.basename(data_path) if index else ""}
+    tmp = settings_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(info, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, settings_path)
+    size = human_size(os.path.getsize(data_path)) if index else "なし"
+    return (f"デスクトップ設定 {len(groups)} 種類 / 個人データ {len(index)} 種類"
+            f"（{size}）")
+
+
+def restore_data(data_path, labels, index):
+    """選んだ個人データをホームフォルダに戻す（同じ名前は上書き）。"""
+    home = os.path.expanduser("~")
+    want = [p for e in index if e["label"] in labels for p in e["paths"]]
+    if not want:
+        return 0
+    n = 0
+    with tarfile.open(data_path, "r:gz") as tar:
+        members = [m for m in tar.getmembers()
+                   if any(m.name == p or m.name.startswith(p.rstrip("/") + "/")
+                          for p in want)]
+        for m in members:
+            try:
+                tar.extract(m, home, filter="data")
+            except TypeError:      # 古い Python
+                tar.extract(m, home)
+            n += 1
+    return n
 
 
 # ------------------------------------------------------- 書き出し・復元スクリプト
@@ -365,8 +683,15 @@ def cli_export(folder):
             raise RuntimeError(f"保存先が見つかりません（USB を外していませんか？）: {folder}")
         items, _ = collect_items()
         path = os.path.join(folder, auto_list_name())
-        write_list_file(path, items, new_meta())
-        cfg["last_export"] = f"{stamp} 成功（{len(items)} 個）"
+        meta = new_meta()
+        meta["repos"] = collect_repos()
+        write_list_file(path, items, meta)
+        cfg = load_config()
+        try:
+            extra = export_extras(path)
+        except Exception as e:
+            extra = f"設定・データは失敗: {e}"
+        cfg["last_export"] = f"{stamp} 成功（{len(items)} 個 / {extra}）"
         save_config(cfg)
         print(f"書き出しました: {path}")
         return 0
@@ -504,7 +829,7 @@ print(path)
 '''
 
 
-def build_install_script(items, fetcher_path="", work_dir=""):
+def build_install_script(items, fetcher_path="", work_dir="", repos=None):
     """root で1回だけ実行する bash 台本を作る。
     進み具合は ##START / ##OK / ##NG の行で知らせる。"""
     q = shlex.quote
@@ -533,6 +858,19 @@ def build_install_script(items, fetcher_path="", work_dir=""):
     snaps = [i for i in items if i["kind"] == "snap"]
     flats = [i for i in items if i["kind"] == "flatpak"]
 
+    if apts and repos:
+        lines.append("say '##INFO 追加の入手先を登録しています…'")
+        for r in repos:
+            for kp, b64 in r.get("keys", {}).items():
+                lines += [f"if [ ! -e {q(kp)} ]; then mkdir -p {q(os.path.dirname(kp))};"
+                          f" echo {q(b64)} | base64 -d > {q(kp)};"
+                          f" chmod 644 {q(kp)}; fi"]
+            if r.get("file"):
+                dest = os.path.join(SOURCES_DIR, os.path.basename(r["file"]))
+                lines += [f"if [ ! -e {q(dest)} ]; then"
+                          f" echo {q(base64.b64encode(r['content'].encode()).decode())}"
+                          f" | base64 -d > {q(dest)}; chmod 644 {q(dest)};"
+                          f" say '##INFO 入手先を登録しました: ' {q(r['file'])}; fi"]
     if apts or ghs:
         lines += ["say '##INFO apt の一覧を更新しています…'", "apt-get update"]
     for i in apts:
@@ -573,7 +911,7 @@ def run_gui(open_path=None):
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
         QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QInputDialog,
-        QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
+        QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPlainTextEdit,
         QProgressBar, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
         QToolBar, QVBoxLayout, QWidget,
     )
@@ -611,7 +949,7 @@ def run_gui(open_path=None):
             form.addRow(info)
             note = QLabel(
                 "保存先には「" + auto_list_name() + "」と復元スクリプト"
-                f"「{RESTORE_SCRIPT}」が上書き保存されます。\n"
+                f"「{RESTORE_SCRIPT}」、デスクトップ設定と個人データが上書き保存されます。\n"
                 "パソコンが切れていた日は、次に起動したときに書き出します。")
             note.setWordWrap(True)
             form.addRow(note)
@@ -650,6 +988,159 @@ def run_gui(open_path=None):
             QMessageBox.information(self, APP_NAME, msg)
             super().accept()
 
+    class DataChoiceDialog(QDialog):
+        """バックアップする個人データを選ぶ。"""
+        def __init__(self, parent):
+            super().__init__(parent)
+            self.setWindowTitle("バックアップする個人データ")
+            self.cfg = load_config()
+            choice = self.cfg.get("data_choice", {})
+            home = os.path.expanduser("~")
+            v = QVBoxLayout(self)
+            v.addWidget(QLabel("書き出しのとき、リストと一緒に保存するものを選んでください。\n"
+                               "（パスワードや鍵などの大事な情報は入れません）"))
+            self.boxes = {}
+            for label, rels, default in DATA_CANDIDATES:
+                ex = [r for r in rels if os.path.exists(os.path.join(home, r))]
+                size = sum(path_size(os.path.join(home, r)) for r in ex)
+                cb = QCheckBox(f"{label}　（{human_size(size)}）" if ex
+                               else f"{label}　（見つかりません）")
+                cb.setChecked(bool(ex) and choice.get(label, default))
+                cb.setEnabled(bool(ex))
+                cb.setToolTip("、".join("~/" + r for r in rels))
+                self.boxes[label] = cb
+                v.addWidget(cb)
+            v.addWidget(QLabel("壁紙の画像は、ホームフォルダ内にあれば自動で保存します。"))
+            v.addWidget(QLabel("ほかに保存したいフォルダ・ファイル（ホームフォルダの中）:"))
+            self.extra = QListWidget()
+            for rel in self.cfg.get("data_extra", []):
+                self.extra.addItem(rel)
+            v.addWidget(self.extra)
+            row = QHBoxLayout()
+            b_add = QPushButton("フォルダを追加…")
+            b_add.clicked.connect(self.add_folder)
+            b_addf = QPushButton("ファイルを追加…")
+            b_addf.clicked.connect(self.add_file)
+            b_del = QPushButton("選んだものを外す")
+            b_del.clicked.connect(
+                lambda: [self.extra.takeItem(self.extra.row(i))
+                         for i in self.extra.selectedItems()])
+            for b in (b_add, b_addf, b_del):
+                row.addWidget(b)
+            v.addLayout(row)
+            btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            btns.accepted.connect(self.accept)
+            btns.rejected.connect(self.reject)
+            v.addWidget(btns)
+            self.resize(560, 520)
+
+        def _add(self, path):
+            home = os.path.expanduser("~")
+            if not path:
+                return
+            path = os.path.abspath(path)
+            if not path.startswith(home + "/"):
+                QMessageBox.warning(self, APP_NAME, "ホームフォルダの中から選んでください。")
+                return
+            rel = os.path.relpath(path, home)
+            if data_forbidden(rel):
+                QMessageBox.warning(self, APP_NAME,
+                                    "パスワードや鍵が入っている場所なので、保存できません。")
+                return
+            size = path_size(path)
+            if size > 500 * 1024 * 1024:
+                ans = QMessageBox.question(
+                    self, APP_NAME, f"{human_size(size)} あります。大きいですが追加しますか？")
+                if ans != QMessageBox.Yes:
+                    return
+            if not self.extra.findItems(rel, Qt.MatchExactly):
+                self.extra.addItem(rel)
+
+        def add_folder(self):
+            self._add(QFileDialog.getExistingDirectory(
+                self, "保存するフォルダ", os.path.expanduser("~")))
+
+        def add_file(self):
+            self._add(QFileDialog.getOpenFileName(
+                self, "保存するファイル", os.path.expanduser("~"))[0])
+
+        def accept(self):
+            cfg = load_config()
+            cfg["data_choice"] = {l: cb.isChecked() for l, cb in self.boxes.items()
+                                  if cb.isEnabled()}
+            cfg["data_extra"] = [self.extra.item(i).text()
+                                 for i in range(self.extra.count())]
+            save_config(cfg)
+            super().accept()
+
+    class RestoreDialog(QDialog):
+        """デスクトップ設定と個人データを戻す。"""
+        def __init__(self, parent, settings_path, data_path):
+            super().__init__(parent)
+            self.setWindowTitle("設定とデータを戻す")
+            with open(settings_path, encoding="utf-8") as f:
+                self.info = json.load(f)
+            self.data_path = data_path
+            v = QVBoxLayout(self)
+            v.addWidget(QLabel(f"{self.info.get('created', '?')} に保存したものです。"
+                               "戻したいものにチェックを入れてください。\n"
+                               "アプリをインストールした後に戻すのがおすすめです。"))
+            self.desk = {}
+            if self.info.get("desktop"):
+                v.addWidget(QLabel("<b>デスクトップの設定</b>"))
+                for label in self.info["desktop"]:
+                    cb = QCheckBox(label)
+                    cb.setChecked(True)
+                    self.desk[label] = cb
+                    v.addWidget(cb)
+            self.data = {}
+            has_tar = self.info.get("data") and os.path.exists(data_path)
+            if has_tar:
+                v.addWidget(QLabel("<b>個人データ</b>（同じ名前のファイルは上書きします）"))
+                for e in self.info["data"]:
+                    cb = QCheckBox(e["label"])
+                    cb.setToolTip("、".join("~/" + p for p in e["paths"]))
+                    cb.setChecked(True)
+                    self.data[e["label"]] = cb
+                    v.addWidget(cb)
+            elif self.info.get("data"):
+                v.addWidget(QLabel("個人データのファイルが見つかりません: " +
+                                   os.path.basename(data_path)))
+            btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            btns.button(QDialogButtonBox.Ok).setText("戻す")
+            btns.accepted.connect(self.accept)
+            btns.rejected.connect(self.reject)
+            v.addWidget(btns)
+
+        def accept(self):
+            labels_d = [l for l, cb in self.data.items() if cb.isChecked()]
+            labels_s = [l for l, cb in self.desk.items() if cb.isChecked()]
+            if not labels_d and not labels_s:
+                super().reject()
+                return
+            lines = []
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                # 画像などのデータを先に戻す（壁紙の設定が画像を指すため）
+                if labels_d:
+                    try:
+                        n = restore_data(self.data_path, labels_d,
+                                         self.info["data"])
+                        lines.append(f"✓ 個人データ {len(labels_d)} 種類（{n} 個）")
+                    except Exception as e:
+                        lines.append(f"✗ 個人データ: {e}")
+                for label, ok, msg in restore_desktop(
+                        self.info.get("desktop", {}), labels_s,
+                        self.info.get("home", "")):
+                    lines.append(("✓ " if ok else "✗ ") + label +
+                                 ("" if ok else f": {msg}"))
+            finally:
+                QApplication.restoreOverrideCursor()
+            QMessageBox.information(
+                self, APP_NAME, "戻しました。\n" + "\n".join(lines) +
+                "\n\n全部を反映させるには、一度ログアウトしてログインし直してください。")
+            super().accept()
+
     class MainWindow(QMainWindow):
         def __init__(self):
             super().__init__()
@@ -673,10 +1164,15 @@ def run_gui(open_path=None):
 
         # ---- 画面づくり
         def _build_ui(self):
-            tb = QToolBar()
-            tb.setMovable(False)
-            self.addToolBar(tb)
+            tb1 = QToolBar("基本")
+            tb1.setMovable(False)
+            self.addToolBar(tb1)
+            self.addToolBarBreak()
+            tb2 = QToolBar("そのほか")
+            tb2.setMovable(False)
+            self.addToolBar(tb2)
             self.acts = []
+            tb = tb1
 
             def act(text, slot):
                 a = QAction(text, self)
@@ -690,9 +1186,12 @@ def run_gui(open_path=None):
             act("② リストを開く", self.open_list_dialog)
             act("③ 選んだものをまとめてインストール", self.install_selected)
             act("失敗したものをやり直す", self.retry_failed)
+            tb = tb2
             act("定番カタログ", self.open_catalog)
-            act("リストを保存", self.save_list)
+            act("設定とデータを戻す…", self.restore_dialog)
+            act("バックアップする個人データ…", self.data_choice_dialog)
             act("自動書き出し…", self.auto_export_dialog)
+            act("リストを保存", self.save_list)
 
             central = QWidget()
             v = QVBoxLayout(central)
@@ -1013,15 +1512,25 @@ def run_gui(open_path=None):
             if not path.endswith(".json"):
                 path += ".json"
             self.list_meta = new_meta()
+            self.list_meta["repos"] = collect_repos()
             self.fill_table(items, "list")
             if not self.write_list(path):
                 return
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                extra = export_extras(path)
+            except Exception as e:
+                extra = f"設定・データの書き出しに失敗しました: {e}"
+            finally:
+                QApplication.restoreOverrideCursor()
             counts = {k: sum(1 for i in items if i["kind"] == k)
                       for k in KIND_LABEL}
             msg = (f"書き出しました：{path}\n"
                    f"Snap {counts['snap']}個 / apt {counts['apt']}個 / "
                    f"Flatpak {counts['flatpak']}個 / GitHub {counts['github']}個 / "
-                   f"DEBファイル {counts['deb-local']}個\n"
+                   f"DEBファイル {counts['deb-local']}個 / "
+                   f"追加の入手先 {len([r for r in self.list_meta['repos'] if r['file']])}個\n"
+                   f"{extra}\n"
                    f"同じフォルダに復元スクリプト「{RESTORE_SCRIPT}」も作りました。")
             if not filtered:
                 msg += ("\n※最初から入っていたパッケージの記録が見つからなかったため、"
@@ -1097,12 +1606,16 @@ def run_gui(open_path=None):
             self.dirty = False
             self.list_meta = {k: data.get(k, "?")
                               for k in ("created", "hostname", "os")}
+            self.list_meta["repos"] = data.get("repos", [])
             n = len(self.checked_items())
             self._set_info(
                 f"{os.path.basename(path)}（{data.get('hostname', '?')} / "
                 f"{data.get('os', '?')} / {data.get('created', '?')} 作成）\n"
                 f"まだ入っていない {n} 個にチェックを入れました。"
-                "いらないものはチェックをはずして「③」を押してください。")
+                "いらないものはチェックをはずして「③」を押してください。"
+                + ("\nインストールが終わったら「設定とデータを戻す…」で、"
+                   "デスクトップの設定と個人データも戻せます。"
+                   if os.path.exists(companion_paths(path)[0]) else ""))
 
         # ---- 定番カタログ
         def open_catalog(self):
@@ -1155,6 +1668,10 @@ def run_gui(open_path=None):
             if acts:
                 extra = "\n\n終わったあとに次の設定もします：\n・" + \
                     "\n・".join(POST_USER_LABEL[a] for a in acts)
+            repos = self.current_repos(targets)
+            if repos:
+                extra += ("\n\n追加の入手先も登録します：\n・" +
+                          "\n・".join(repo_label(r) for r in repos if r["file"]))
             if any((i["kind"], i["name"]) in PRE_ROOT for i in targets):
                 extra += ("\n\n※動画・音楽コーデックは、Microsoftフォントの"
                           "利用規約に同意したものとして入れます。")
@@ -1166,6 +1683,32 @@ def run_gui(open_path=None):
                 + extra)
             if ans == QMessageBox.Yes:
                 self.start_install(targets)
+
+        def current_repos(self, targets):
+            if self.mode != "list" or not any(i["kind"] == "apt" for i in targets):
+                return []
+            return [r for r in self.list_meta.get("repos", [])
+                    if r.get("file") or r.get("keys")]
+
+        def data_choice_dialog(self):
+            DataChoiceDialog(self).exec()
+
+        def restore_dialog(self):
+            if not self.list_path or self.mode != "list":
+                path, _ = QFileDialog.getOpenFileName(
+                    self, "戻したいリストを選んでください", os.path.expanduser("~"),
+                    "よみがえりリスト (*.json)")
+                if not path:
+                    return
+            else:
+                path = self.list_path
+            settings_path, data_path = companion_paths(path)
+            if not os.path.exists(settings_path):
+                QMessageBox.information(
+                    self, APP_NAME, "このリストには設定とデータが保存されていません。\n"
+                    "（v0.4.0 より前に書き出したリストです）")
+                return
+            RestoreDialog(self, settings_path, data_path).exec()
 
         def retry_failed(self):
             targets = [it for r, it in enumerate(self.items)
@@ -1187,7 +1730,8 @@ def run_gui(open_path=None):
                 f.write(GITHUB_FETCHER)
             script = os.path.join(self.work_dir, "install.sh")
             with open(script, "w", encoding="utf-8") as f:
-                f.write(build_install_script(targets, fetcher, self.work_dir))
+                f.write(build_install_script(targets, fetcher, self.work_dir,
+                                             self.current_repos(targets)))
 
             for it in targets:
                 self.set_state(self.row_of[(it["kind"], it["name"])], "待ち")

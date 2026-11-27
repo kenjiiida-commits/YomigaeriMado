@@ -1,11 +1,11 @@
 #!/bin/bash
 # よみがえり窓 の DEB パッケージを作る
 #   使い方:  bash build_deb.sh
-#   できたら: sudo apt install ./yomigaeri-mado_0.3.0_all.deb
+#   できたら: sudo apt install ./yomigaeri-mado_0.4.0_all.deb
 set -e
 cd "$(dirname "$0")"
 
-VER=0.3.0
+VER=0.4.0
 PKG=yomigaeri-mado
 ROOT=build/${PKG}_${VER}_all
 
